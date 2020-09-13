@@ -1,13 +1,13 @@
 ﻿using Accord.Audio;
 using Accord.DirectSound;
 using AForge.Video.DirectShow;
-using NAudio.CoreAudioApi;
-using NAudio.Wave;
+using SharpDX;
+using SharpDX.Multimedia;
+using SharpDX.XAudio2;
 using System;
+using System.Collections.Generic;
 using System.Threading;
-using System.Threading.Tasks;
 using System.Windows.Forms;
-using SharpDX.DirectSound;
 
 namespace Camera
 {
@@ -18,41 +18,33 @@ namespace Camera
             InitializeComponent();
         }
 
-        // フィールド
+        //Video関係
         public bool DeviceExist = false;
-        public bool AudioDeviceExist = false;
-        public bool OutputAudioDeviceExist = false;
         public FilterInfoCollection videoDevices;
-        public AudioDeviceCollection audioDevices;
-        public AudioDeviceCollection outputAudioDevices;
         public VideoCaptureDevice videoSource = null;
-        public AudioCaptureDevice audioSource = null;
-        public AudioOutputDevice audioOutput = null;
-        public AudioOutputDevice[] audioOutputList = {
-            null, null, null, null, null, null, null, null, null, null ,
-            null, null, null, null, null, null, null, null, null, null ,
-            null, null, null, null, null, null, null, null, null, null ,
-            null, null, null, null, null, null, null, null, null, null ,
-            null, null, null, null, null, null, null, null, null, null ,
-            null, null, null, null, null, null, null, null, null, null ,
-            null, null, null, null, null, null, null, null, null, null ,
-            null, null, null, null, null, null, null, null, null, null ,
-            null, null, null, null, null, null, null, null, null, null ,
-            null, null, null, null, null, null, null, null, null, null ,
-            null, null, null, null, null, null, null, null, null, null ,
-            null, null, null, null, null, null, null, null, null, null ,
-            null, null, null, null, null, null, null, null };
-        public Form2 videoWindow = null;
         private VideoCapabilities[] videoCapabilities;
         private VideoCapabilities[] videoCapabilities2;
-        private Signal s = null;
-        private float[] buffer;
-        private bool first = true;
 
-        private BufferedWaveProvider bufferedWaveProvider = null;
-        private MMDevice mmDevice = null;
-        private Thread thread = null;
-        private int last = 0;
+        //Audio関係
+        public bool AudioDeviceExist = false;
+        public bool OutputAudioDeviceExist = false;
+        public AudioDeviceCollection audioDevices;
+        public AudioDeviceCollection outputAudioDevices;
+        public AudioCaptureDevice audioSource = null;
+
+        //フォーム(映像表示画面)
+        public Form2 videoWindow = null;
+
+        //音声出力関係(AForge)
+        private Signal s = null;
+
+        //音声出力関係(XAudio2)
+        private XAudio2 xaDevice;
+        private MasteringVoice xaMaster;
+        private Queue<float[]> buffer = new Queue<float[]>();
+        private SourceVoice[] sourceVoices = new SourceVoice[2];
+        private bool whichVoice = false;
+        private bool OK = false;
 
         // Loadイベント
         private void Form1_Load(object sender, EventArgs e)
@@ -86,6 +78,7 @@ namespace Camera
             }
         }
 
+        // マイク、スピーカ情報の取得
         public void getAudioInfo()
         {
             try
@@ -128,6 +121,60 @@ namespace Camera
             {
                 OutputAudioDeviceExist = false;
                 comboBox5.Items.Add("No OutputAudio Devices");
+            }
+        }
+
+        private void initXAudio2()
+        {
+            try
+            {
+                // XAudio初期化
+                xaDevice = new XAudio2();
+                xaMaster = new MasteringVoice(xaDevice);
+            }
+            // vistaの時、スピーカーなどが接続されていない場合は生成できない
+            catch
+            {
+                MessageBox.Show("サウンドデバイスの生成に失敗しました。", "エラー");
+            }
+        }
+
+        private void finalizeXAudio2()
+        {
+            if (xaMaster != null)
+                xaMaster.Dispose();
+            if (xaDevice != null)
+                xaDevice.Dispose();
+        }
+
+        private void playSound()
+        {
+            while (true)
+            {
+                if (xaDevice == null || audioSource == null)
+                    return;
+
+                if (buffer.Count != 0)
+                {
+                    DataStream dataStream = DataStream.Create(buffer.Dequeue(), true, false);
+                    AudioBuffer buf = new AudioBuffer()
+                    {
+                        AudioBytes = (int)dataStream.Length,
+                        Stream = dataStream,
+                        LoopCount = XAudio2.NoLoopRegion,
+                        LoopBegin = 0,
+                        LoopLength = 0,
+                        PlayBegin = 0,
+                        PlayLength = 0,
+                        Flags = BufferFlags.EndOfStream
+                    };
+
+                    WaveFormat waveFormat = new WaveFormat(audioSource.SampleRate, 32, audioSource.Channels);
+                    sourceVoices[whichVoice ? 0 : 1] = new SourceVoice(xaDevice, waveFormat, false);
+                    sourceVoices[whichVoice ? 0 : 1].SubmitSourceBuffer(buf, null);
+                    sourceVoices[whichVoice ? 0 : 1].Start();
+                    whichVoice = !whichVoice;
+                }
             }
         }
 
@@ -174,30 +221,11 @@ namespace Camera
                 }
                 if (checkBox1.Checked)
                 {
-                    first = true;
                     this.audioSource = new AudioCaptureDevice((AudioDeviceInfo)comboBox2.SelectedItem);
+                    initXAudio2();
                     this.audioSource.NewFrame += source_NewFrame;
                     this.audioSource.Start();
-                    Console.Out.WriteLine(audioSource.SampleRate + " " + audioSource.Channels);
-                    /*
-                    this.audioOutput = new AudioOutputDevice(this.Handle, audioSource.SampleRate, audioSource.Channels);
-                    this.audioOutput.Output = ((AudioDeviceInfo)comboBox5.SelectedItem).Guid.ToString();
-                    this.audioOutput.NewFrameRequested += output_NewFrameRequested;
-                    this.audioOutput.FramePlayingStarted += output_FramePlayingStarted;
-                    this.audioOutput.Play();
-                    //*/
-                    //*
-                    for (int i = 0; i < audioOutputList.Length; i++)
-                    {
-                        this.audioOutputList[i] = new AudioOutputDevice(this.Handle, audioSource.SampleRate, audioSource.Channels);
-                        this.audioOutputList[i].Output = ((AudioDeviceInfo)comboBox5.SelectedItem).Guid.ToString();
-                    }
-                    //*/
-                    /*
-                    bufferedWaveProvider = new BufferedWaveProvider(new WaveFormat(audioSource.SampleRate, 16, audioSource.Channels));
-                    mmDevice = new MMDeviceEnumerator().GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
-                    Task t = waveOutput();
-                    //*/
+                    new Thread(playSound).Start();
                 }
             }
             else
@@ -237,108 +265,13 @@ namespace Camera
                 audioSource = null;
                 Console.Out.WriteLine("audioSource Disposed");
             }
-            if (!(audioOutput == null))
-            {
-                if (audioOutput.IsRunning)
-                {
-                    //audioOutput.Stop();
-                    audioOutput.SignalToStop();
-                    audioOutput.WaitForStop();
-                }
-                audioOutput.Dispose();
-                audioOutput = null;
-                Console.Out.WriteLine("audioOutput Disposed");
-            }
-            for (int i = 0; i < audioOutputList.Length; i++)
-            {
-                if (!(audioOutputList[i] == null))
-                {
-                    if (audioOutputList[i].IsRunning)
-                    {
-                        //audioOutput.Stop();
-                        audioOutputList[i].SignalToStop();
-                        audioOutputList[i].WaitForStop();
-                    }
-                    audioOutputList[i].Dispose();
-                    audioOutputList[i] = null;
-                    Console.Out.WriteLine("audioOutputList[" + i + "] Disposed");
-                }
-            }
-        }
-
-        private void output_FramePlayingStarted(object sender, PlayFrameEventArgs eventArgs)
-        {
-            Console.Out.WriteLine(eventArgs.FrameIndex);
-            Console.Out.WriteLine(eventArgs.Count);
-        }
-
-        private async Task waveOutput()
-        {
-            using (IWavePlayer wavPlayer = new WasapiOut(mmDevice, AudioClientShareMode.Shared, false, 200))
-            {
-                wavPlayer.Init(bufferedWaveProvider);
-                wavPlayer.Play();
-
-
-                //Console.WriteLine("Press ENTER to exit...");
-                //Console.ReadLine();
-
-                //*
-                while (audioSource != null && audioSource.IsRunning)
-                {
-                    //Console.Out.WriteLine("Wait " + DateTime.Now);
-                    await Task.Delay(32);
-                }
-                //*/
-
-                wavPlayer.Stop();
-            }
-
-            Console.WriteLine("STOP WAVEOUT");
-        }
-
-        private void output_NewFrameRequested(object sender, NewFrameRequestedEventArgs eventArgs)
-        {
-            Console.Out.WriteLine(eventArgs.Frames + " " + eventArgs.FrameIndex + " " + DateTime.Now);
-            //*
-            if (s != null)
-            {
-                eventArgs.Buffer = buffer;
-                eventArgs.Frames = buffer.Length;
-                eventArgs.FrameIndex = 0;
-            }
-            //*/
-            Console.Out.WriteLine("buffer " + DateTime.Now);
+            finalizeXAudio2();
         }
 
         private void source_NewFrame(object sender, NewFrameEventArgs eventArgs)
         {
             s = eventArgs.Signal;
-            //for (int i = last; i != last - 1 || (last == 0 && i != audioOutputList.Length); i++)
-            /*
-            for (int i = 0; i < audioOutputList.Length; i++)
-            {
-                if (!audioOutputList[i].IsRunning)
-                {
-                    audioOutputList[i].Play(s.ToFloat());
-                    last = i;
-                    break;
-                }
-                //if (audioOutputList.Length - 1 == i) i = -1;
-            }
-            //*/
-            audioOutputList[last].Play(s.ToFloat());
-            last++;
-            if (last == audioOutputList.Length) last = 0;
-            //buffer = s.ToFloat();
-            //bufferedWaveProvider.AddSamples(s.Data.ToByteArray(), 0, s.Data.ToByteArray().Length - 1);
-            /*
-            if (first)
-            {
-                first = false;
-                audioOutput.Play(buffer);
-            }
-            //*/
+            buffer.Enqueue(s.ToFloat());
         }
 
         // フレームレートの取得
